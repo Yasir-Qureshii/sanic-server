@@ -1,8 +1,9 @@
 import asyncio
 import aiohttp
 import io
+import cv2
+import numpy as np
 from sanic import Sanic, response, request as sanic_request
-from PIL import Image, ImageOps
 
 app = Sanic(__name__)
 
@@ -22,19 +23,22 @@ async def fetch_and_process_image(session, url):
                 # Read the image content
                 image_bytes = await response.read()
 
-                # Open the image using Pillow
-                image = Image.open(io.BytesIO(image_bytes))
+                # Convert image bytes to numpy array
+                image_data = np.frombuffer(image_bytes, np.uint8)
 
-                # Resize the image to the specified thumbnail size with antialiasing
-                image_thumbnail = ImageOps.fit(image, thumbnail_size, method=0, bleed=0.0, centering=(0.5, 0.5))
+                # Decode the image using OpenCV
+                image = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
+
+                # Resize the image to the specified thumbnail size
+                image_thumbnail = cv2.resize(image, thumbnail_size)
 
                 return image_thumbnail
             else:
                 # Return a black image tile in case of fetching error
-                return Image.new("RGB", thumbnail_size, (0, 0, 0))
+                return np.zeros((thumbnail_size[1], thumbnail_size[0], 3), np.uint8)
     except Exception as e:
         # Return a blue image tile in case of any error (e.g., image decode error)
-        return Image.new("RGB", thumbnail_size, (0, 0, 255))
+        return np.full((thumbnail_size[1], thumbnail_size[0], 3), (0, 0, 255), np.uint8)
 
 # Function to fetch the image URLs from the API with optional limit and offset
 async def fetch_image_urls(session, limit=10, offset=0):
@@ -78,34 +82,28 @@ async def create_composite_image(limit=10, offset=0):
 
         for i in range(num_rows):
             row_images = images[i * images_per_row : (i + 1) * images_per_row]
-            row_image = Image.new("RGB", (thumbnail_size[0] * images_per_row, thumbnail_size[1]))
-            for j, image in enumerate(row_images):
-                row_image.paste(image, (j * thumbnail_size[0], 0))
+            row_image = np.hstack(row_images)
             rows.append(row_image)
 
         # Create the composite image by stacking rows vertically
-        composite_image = Image.new("RGB", (thumbnail_size[0] * images_per_row, thumbnail_size[1] * num_rows))
-        for i, row in enumerate(rows):
-            composite_image.paste(row, (0, i * thumbnail_size[1]))
+        composite_image = np.vstack(rows)
 
         return composite_image
 
 @app.route('/')
 async def serve_composite_image(request: sanic_request):
     # Get the limit and offset query parameters from the request
-    limit = request.args.get('limit', 10)
+    limit = request.args.get('limit', num_images)
     offset = request.args.get('offset', 0)
 
     # Create the composite image with optional limit and offset
     composite_image = await create_composite_image(limit, offset)
 
     # Convert the composite image to bytes
-    with io.BytesIO() as output_buffer:
-        composite_image.save(output_buffer, format="JPEG")
-        image_bytes = output_buffer.getvalue()
+    _, image_bytes = cv2.imencode('.jpeg', composite_image)
 
     # Serve the composite image as a response
-    return response.raw(image_bytes, content_type='image/jpeg')
+    return response.raw(image_bytes.tobytes(), content_type='image/jpeg')
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000)
